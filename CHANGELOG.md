@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-03-30
+
 - **BREAKING**: Replace git repo scanning with OpenSpec project detection
 - **BREAKING**: Remove git status, diff panel, and all go-git dependency
 - feat: scan for `openspec/` directories instead of `.git/`
