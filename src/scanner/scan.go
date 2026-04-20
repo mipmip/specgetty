@@ -205,7 +205,7 @@ func ParseProjectInfo(dir string) ProjectInfo {
 	changesDir := filepath.Join(openspecDir, "changes")
 	if entries, err := os.ReadDir(changesDir); err == nil {
 		for _, e := range entries {
-			if !e.IsDir() || e.Name() == "archive" {
+			if !e.IsDir() || e.Name() == "archive" || e.Name() == "discarded" {
 				continue
 			}
 			info.ActiveChanges = append(info.ActiveChanges, e.Name())

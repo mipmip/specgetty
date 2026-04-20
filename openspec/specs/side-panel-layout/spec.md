@@ -26,11 +26,15 @@ The left panel SHALL display project directory basenames instead of full paths.
 - **THEN** the left panel SHALL append the parent directory name to disambiguate (e.g. `specgetty (cVibeCoding)` and `specgetty (cForks)`)
 
 ### Requirement: Detail panel shows project info and file listing
-The right panel SHALL display the selected project's full path as a header, followed by the openspec/ directory contents.
+The detail panel SHALL display a persistent header with the project path and stats above the tab bar, visible regardless of which tab is active.
 
-#### Scenario: Project selected
-- **WHEN** a project is selected in the left panel
-- **THEN** the right panel SHALL show the full project path on the first line, a blank line, then the openspec/ file listing with d/f indicators
+#### Scenario: Header always visible
+- **WHEN** any tab is active in the detail panel
+- **THEN** the project path and stats line SHALL be visible above the tab bar
+
+#### Scenario: Stats line content
+- **WHEN** a project is selected
+- **THEN** the stats line SHALL show spec count, active changes count, and archived changes count
 
 #### Scenario: No project selected
 - **WHEN** no projects are found

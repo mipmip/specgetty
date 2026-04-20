@@ -1,12 +1,17 @@
 package ui
 
 import (
+	"archive/zip"
 	"fmt"
+	"io"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -35,6 +40,20 @@ const (
 	archiveConfirming = 1
 	archiveRunning    = 2
 	archiveResult     = 3
+)
+
+const (
+	discardIdle       = 0
+	discardConfirming = 1
+	discardRunning    = 2
+	discardResult     = 3
+)
+
+const (
+	exportIdle       = 0
+	exportConfirming = 1
+	exportRunning    = 2
+	exportResult     = 3
 )
 
 var tabNames = []string{"specs", "changes", "archive", "config"}
@@ -141,6 +160,15 @@ type model struct {
 	archiveChangeName string
 	archiveResultMsg  string
 	archiveResultOk   bool
+	discardState      int
+	discardChangeName string
+	discardResultMsg  string
+	discardResultOk   bool
+	exportState       int
+	exportChangeName  string
+	exportResultMsg   string
+	exportResultOk    bool
+	exportIsArchived  bool
 	width           int
 	height          int
 	program         *tea.Program
@@ -216,6 +244,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.archiveState == archiveRunning {
+			return m, nil
+		}
+
+		// Export modal intercepts all keys
+		if m.exportState == exportConfirming {
+			switch msg.String() {
+			case "y":
+				m.exportState = exportRunning
+				projectPath := m.repoPaths[m.cursor]
+				cmds = append(cmds, doExportChange(projectPath, m.exportChangeName, m.exportIsArchived))
+			case "n", "esc":
+				m.exportState = exportIdle
+			}
+			return m, tea.Batch(cmds...)
+		}
+		if m.exportState == exportResult {
+			m.exportState = exportIdle
+			return m, nil
+		}
+		if m.exportState == exportRunning {
+			return m, nil
+		}
+
+		// Discard modal intercepts all keys
+		if m.discardState == discardConfirming {
+			switch msg.String() {
+			case "y":
+				m.discardState = discardRunning
+				projectPath := m.repoPaths[m.cursor]
+				cmds = append(cmds, doDiscardChange(projectPath, m.discardChangeName))
+			case "n", "esc":
+				m.discardState = discardIdle
+			}
+			return m, tea.Batch(cmds...)
+		}
+		if m.discardState == discardResult {
+			m.discardState = discardIdle
+			return m, nil
+		}
+		if m.discardState == discardRunning {
 			return m, nil
 		}
 
@@ -458,6 +526,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.archiveState = archiveConfirming
 				}
 			}
+		case "d":
+			if m.detailTab == tabChanges {
+				changes := m.currentChanges()
+				if len(changes) > 0 && m.changeCursor < len(changes) {
+					m.discardChangeName = changes[m.changeCursor].Name
+					m.discardState = discardConfirming
+				}
+			}
+		case "e":
+			if m.detailTab == tabChanges {
+				changes := m.currentChanges()
+				if len(changes) > 0 && m.changeCursor < len(changes) {
+					m.exportChangeName = changes[m.changeCursor].Name
+					m.exportIsArchived = false
+					m.exportState = exportConfirming
+				}
+			} else if m.detailTab == tabArchive {
+				archived := m.currentArchivedChanges()
+				if len(archived) > 0 && m.archiveCursor < len(archived) {
+					m.exportChangeName = archived[m.archiveCursor].Name
+					m.exportIsArchived = true
+					m.exportState = exportConfirming
+				}
+			}
 		}
 
 	case archiveMsg:
@@ -467,6 +559,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.ok && len(m.repoPaths) > 0 {
 			cmds = append(cmds, m.doScanSingle(m.repoPaths[m.cursor]))
 		}
+
+	case discardMsg:
+		m.discardResultOk = msg.ok
+		m.discardResultMsg = msg.output
+		m.discardState = discardResult
+		if msg.ok && len(m.repoPaths) > 0 {
+			cmds = append(cmds, m.doScanSingle(m.repoPaths[m.cursor]))
+		}
+
+	case exportMsg:
+		m.exportResultOk = msg.ok
+		m.exportResultMsg = msg.output
+		m.exportState = exportResult
 
 	case fsChangeMsg:
 		if m.zoomed && len(m.repoPaths) > 0 {
@@ -755,6 +860,16 @@ type archiveMsg struct {
 	output string
 }
 
+type discardMsg struct {
+	ok     bool
+	output string
+}
+
+type exportMsg struct {
+	ok     bool
+	output string
+}
+
 func doArchiveChange(projectPath string, changeName string) tea.Cmd {
 	return func() tea.Msg {
 		if _, err := exec.LookPath("openspec"); err != nil {
@@ -767,6 +882,114 @@ func doArchiveChange(projectPath string, changeName string) tea.Cmd {
 			return archiveMsg{ok: false, output: strings.TrimSpace(string(out))}
 		}
 		return archiveMsg{ok: true, output: strings.TrimSpace(string(out))}
+	}
+}
+
+func doDiscardChange(projectPath string, changeName string) tea.Cmd {
+	return func() tea.Msg {
+		changesDir := filepath.Join(projectPath, "openspec", "changes")
+		discardedDir := filepath.Join(changesDir, "discarded")
+		if err := os.MkdirAll(discardedDir, 0755); err != nil {
+			return discardMsg{ok: false, output: fmt.Sprintf("Failed to create discarded directory: %v", err)}
+		}
+		datePrefix := time.Now().Format("2006-01-02")
+		target := filepath.Join(discardedDir, datePrefix+"-"+changeName)
+		if _, err := os.Stat(target); err == nil {
+			return discardMsg{ok: false, output: fmt.Sprintf("Target already exists: %s", datePrefix+"-"+changeName)}
+		}
+		src := filepath.Join(changesDir, changeName)
+		if err := os.Rename(src, target); err != nil {
+			return discardMsg{ok: false, output: fmt.Sprintf("Failed to move: %v", err)}
+		}
+		return discardMsg{ok: true, output: fmt.Sprintf("Discarded \"%s\"", changeName)}
+	}
+}
+
+var archiveDatePrefix = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}-`)
+
+func exportSemanticName(changeName string, isArchived bool) string {
+	if isArchived {
+		return archiveDatePrefix.ReplaceAllString(changeName, "")
+	}
+	return changeName
+}
+
+func exportDestPath(semanticName string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "."
+	}
+	dateStr := time.Now().Format("2006-01-02")
+	return filepath.Join(home, semanticName+"-"+dateStr+".zip")
+}
+
+func doExportChange(projectPath string, changeName string, isArchived bool) tea.Cmd {
+	return func() tea.Msg {
+		var srcDir string
+		if isArchived {
+			srcDir = filepath.Join(projectPath, "openspec", "changes", "archive", changeName)
+		} else {
+			srcDir = filepath.Join(projectPath, "openspec", "changes", changeName)
+		}
+
+		if _, err := os.Stat(srcDir); err != nil {
+			return exportMsg{ok: false, output: fmt.Sprintf("Source not found: %s", srcDir)}
+		}
+
+		semanticName := exportSemanticName(changeName, isArchived)
+		destPath := exportDestPath(semanticName)
+
+		zipFile, err := os.Create(destPath)
+		if err != nil {
+			return exportMsg{ok: false, output: fmt.Sprintf("Failed to create zip: %v", err)}
+		}
+		defer zipFile.Close()
+
+		w := zip.NewWriter(zipFile)
+		defer w.Close()
+
+		err = filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+
+			relPath, err := filepath.Rel(srcDir, path)
+			if err != nil {
+				return err
+			}
+			zipPath := filepath.Join(semanticName, relPath)
+
+			header, err := zip.FileInfoHeader(info)
+			if err != nil {
+				return err
+			}
+			header.Name = zipPath
+			header.Method = zip.Deflate
+
+			writer, err := w.CreateHeader(header)
+			if err != nil {
+				return err
+			}
+
+			file, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer file.Close()
+
+			_, err = io.Copy(writer, file)
+			return err
+		})
+
+		if err != nil {
+			os.Remove(destPath)
+			return exportMsg{ok: false, output: fmt.Sprintf("Failed to create zip: %v", err)}
+		}
+
+		return exportMsg{ok: true, output: fmt.Sprintf("Exported to %s", destPath)}
 	}
 }
 
@@ -848,6 +1071,60 @@ func (m model) View() string {
 			prefix = "✗ "
 		}
 		content := prefix + m.archiveResultMsg + "\n\nPress any key to dismiss."
+		modal := modalStyle.Width(m.width * 3 / 4).Render(content)
+		view = placeOverlay(m.width, m.height, modal, view)
+	}
+
+	// Discard modals
+	switch m.discardState {
+	case discardConfirming:
+		var content string
+		changes := m.currentChanges()
+		if m.changeCursor < len(changes) {
+			ci := changes[m.changeCursor]
+			if ci.TasksTotal > 0 && ci.TasksDone < ci.TasksTotal {
+				incomplete := ci.TasksTotal - ci.TasksDone
+				content = fmt.Sprintf("⚠ %d incomplete task(s) in \"%s\"\n\nDiscard anyway? (y/n)", incomplete, m.discardChangeName)
+			} else {
+				content = fmt.Sprintf("Discard \"%s\"? (y/n)", m.discardChangeName)
+			}
+		}
+		modal := modalStyle.Width(50).Render(content)
+		view = placeOverlay(m.width, m.height, modal, view)
+	case discardRunning:
+		modal := modalStyle.Width(40).Render(m.spinner.View() + " Discarding...")
+		view = placeOverlay(m.width, m.height, modal, view)
+	case discardResult:
+		var prefix string
+		if m.discardResultOk {
+			prefix = "✓ "
+		} else {
+			prefix = "✗ "
+		}
+		content := prefix + m.discardResultMsg + "\n\nPress any key to dismiss."
+		modal := modalStyle.Width(m.width * 3 / 4).Render(content)
+		view = placeOverlay(m.width, m.height, modal, view)
+	}
+
+	// Export modals
+	switch m.exportState {
+	case exportConfirming:
+		semanticName := exportSemanticName(m.exportChangeName, m.exportIsArchived)
+		destPath := exportDestPath(semanticName)
+		content := fmt.Sprintf("Export \"%s\"?\n\n→ %s\n\n(y/n)", semanticName, destPath)
+		modal := modalStyle.Width(60).Render(content)
+		view = placeOverlay(m.width, m.height, modal, view)
+	case exportRunning:
+		modal := modalStyle.Width(40).Render(m.spinner.View() + " Exporting...")
+		view = placeOverlay(m.width, m.height, modal, view)
+	case exportResult:
+		var prefix string
+		if m.exportResultOk {
+			prefix = "✓ "
+		} else {
+			prefix = "✗ "
+		}
+		content := prefix + m.exportResultMsg + "\n\nPress any key to dismiss."
 		modal := modalStyle.Width(m.width * 3 / 4).Render(content)
 		view = placeOverlay(m.width, m.height, modal, view)
 	}
@@ -1377,6 +1654,11 @@ func (m model) renderNavBar() string {
 	}
 	if m.detailTab == tabChanges && len(m.currentChanges()) > 0 {
 		keys = append(keys, struct{ key, action string }{"a", "archive"})
+		keys = append(keys, struct{ key, action string }{"d", "discard"})
+		keys = append(keys, struct{ key, action string }{"e", "export"})
+	}
+	if m.detailTab == tabArchive && len(m.currentArchivedChanges()) > 0 {
+		keys = append(keys, struct{ key, action string }{"e", "export"})
 	}
 
 	var left strings.Builder
