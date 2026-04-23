@@ -1,5 +1,7 @@
 # specgetty
 
+![specgetty demo](demo.gif)
+
 Do you work with multiple projects that use OpenSpec for managing specifications?
 
 Have you ever lost track of which OpenSpec projects exist on your local machine
@@ -45,4 +47,12 @@ Simple key navigation in the UI as follows:
 
 ```bash
 make lint
+```
+
+### Generating the preview GIF
+
+The preview GIF is generated using [VHS](https://github.com/charmbracelet/vhs):
+
+```bash
+vhs demo.tape
 ```
